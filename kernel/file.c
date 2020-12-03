@@ -16,7 +16,7 @@
 struct devsw devsw[NDEV];
 struct {
   struct spinlock lock;
-  struct file file[NFILE];
+  // struct file file[NFILE];
 } ftable;
 
 void
@@ -32,12 +32,21 @@ filealloc(void)
   struct file *f;
 
   acquire(&ftable.lock);
-  for(f = ftable.file; f < ftable.file + NFILE; f++){
-    if(f->ref == 0){
-      f->ref = 1;
-      release(&ftable.lock);
-      return f;
-    }
+  // for(f = ftable.file; f < ftable.file + NFILE; f++){
+  //   if(f->ref == 0){
+  //     f->ref = 1;
+  //     release(&ftable.lock);
+  //     return f;
+  //   }
+  // }
+  // dynamically request memory
+  f = (struct file*) bd_malloc(sizeof(struct file));
+  if(f) {
+    // clear data
+    memset(f, 0, sizeof(struct file));
+    f->ref = 1;
+    release(&ftable.lock);
+    return f;
   }
   release(&ftable.lock);
   return 0;
@@ -60,7 +69,7 @@ void
 fileclose(struct file *f)
 {
   struct file ff;
-
+  
   acquire(&ftable.lock);
   if(f->ref < 1)
     panic("fileclose");

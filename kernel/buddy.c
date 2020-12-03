@@ -34,6 +34,8 @@ typedef struct sz_info Sz_info;
 static Sz_info *bd_sizes; 
 static void *bd_base;   // start address of memory managed by the buddy allocator
 static struct spinlock lock;
+static void *freespace_start;
+static void *freespace_end;
 
 // Return 1 if bit at position index in array is set to 1
 int bit_isset(char *array, int index) {
@@ -54,6 +56,26 @@ void bit_clear(char *array, int index) {
   char b = array[index/8];
   char m = (1 << (index % 8));
   array[index/8] = (b & ~m);
+}
+
+// 翻转标志位
+// index表示的是第几个块
+// 由于采用了一位表示两个块的方法
+// 相邻兄弟对应的标志位是一样的,都是在编号为(index/2)/8的数组中
+// 移位后异或表示将对应的位数翻转
+void bit_flip(char *array, int index) {
+  index = index >> 1;
+  char b = array[index/8];
+  char m = (1 << (index % 8));
+  array[index/8] = (b ^ m);
+}
+
+// 判断当前位是否是1
+int bit_get(char *array, int index) {
+  index = index >> 1;
+  char b = array[index/8];
+  char m = (1 << (index % 8));
+  return (b & m) == m;
 }
 
 // Print a bit vector as a list of ranges of 1 bits
@@ -139,13 +161,18 @@ bd_malloc(uint64 nbytes)
 
   // Found a block; pop it and potentially split it.
   char *p = lst_pop(&bd_sizes[k].free);
-  bit_set(bd_sizes[k].alloc, blk_index(k, p));
+  // bit_set(bd_sizes[k].alloc, blk_index(k, p));
+  bit_flip(bd_sizes[k].alloc, blk_index(k, p));
   for(; k > fk; k--) {
     // split a block at size k and mark one half allocated at size k-1
     // and put the buddy on the free list at size k-1
     char *q = p + BLK_SIZE(k-1);   // p's buddy
+    // mark spilt
     bit_set(bd_sizes[k].split, blk_index(k, p));
-    bit_set(bd_sizes[k-1].alloc, blk_index(k-1, p));
+    // bit_set(bd_sizes[k-1].alloc, blk_index(k-1, p));、
+    // mark block allocated 
+    bit_flip(bd_sizes[k-1].alloc, blk_index(k-1, p));
+    // add free block info
     lst_push(&bd_sizes[k-1].free, q);
   }
   release(&lock);
@@ -174,11 +201,18 @@ bd_free(void *p) {
   acquire(&lock);
   for (k = size(p); k < MAXSIZE; k++) {
     int bi = blk_index(k, p);
+    // find its buddy
     int buddy = (bi % 2 == 0) ? bi+1 : bi-1;
-    bit_clear(bd_sizes[k].alloc, bi);  // free p at size k
-    if (bit_isset(bd_sizes[k].alloc, buddy)) {  // is buddy allocated?
-      break;   // break out of loop
+    // bit_clear(bd_sizes[k].alloc, bi);  // free p at size k
+
+    // free 
+    bit_flip(bd_sizes[k].alloc, bi);
+    // 如果翻转后的标志位是1，说明伙伴已经被占用，此时不能合并
+    // 否则说明伙伴也是为空，可以合并
+    if(bit_get(bd_sizes[k].alloc, buddy)) {  // is buddy allocated?
+      break;
     }
+
     // budy is free; merge with buddy
     q = addr(k, buddy);
     lst_remove(q);    // remove buddy from free list
@@ -229,7 +263,8 @@ bd_mark(void *start, void *stop)
         // if a block is allocated at size k, mark it as split too.
         bit_set(bd_sizes[k].split, bi);
       }
-      bit_set(bd_sizes[k].alloc, bi);
+      // bit_set(bd_sizes[k].alloc, bi);
+      bit_flip(bd_sizes[k].alloc, bi);
     }
   }
 }
@@ -240,13 +275,16 @@ int
 bd_initfree_pair(int k, int bi) {
   int buddy = (bi % 2 == 0) ? bi+1 : bi-1;
   int free = 0;
-  if(bit_isset(bd_sizes[k].alloc, bi) !=  bit_isset(bd_sizes[k].alloc, buddy)) {
-    // one of the pair is free
+
+  if(bit_get(bd_sizes[k].alloc, bi)) {
+    // 标志位为1，说明一个已分配一个未分配
     free = BLK_SIZE(k);
-    if(bit_isset(bd_sizes[k].alloc, bi))
-      lst_push(&bd_sizes[k].free, addr(k, buddy));   // put buddy on free list
+    // 如果当前是buddy未分配，则设置buddy为空闲
+    if(addr(k, buddy) >= freespace_start && (addr(k, buddy) + BLK_SIZE(k)) <= freespace_end)
+      lst_push(&bd_sizes[k].free, addr(k, buddy));    // put buddy on free list
+    // 如果当前是bi未分配，则设置bi为空闲
     else
-      lst_push(&bd_sizes[k].free, addr(k, bi));      // put bi on free list
+      lst_push(&bd_sizes[k].free, addr(k, bi));   // put bi on free list
   }
   return free;
 }
@@ -254,6 +292,9 @@ bd_initfree_pair(int k, int bi) {
 // Initialize the free lists for each size k.  For each size k, there
 // are only two pairs that may have a buddy that should be on free list:
 // bd_left and bd_right.
+// 只有当自己可分配、伙伴不可分配或者自己不可分配、伙伴可分配时，才能添加到free列表中
+// 如果两个都是可分配的，说明应该合并成为一个更大的块，此时标记会有重复
+// 如果两个都是不可分配的，说明没有空闲的空间
 int
 bd_initfree(void *bd_left, void *bd_right) {
   int free = 0;
@@ -317,7 +358,12 @@ bd_init(void *base, void *end) {
   // initialize free list and allocate the alloc array for each size k
   for (int k = 0; k < nsizes; k++) {
     lst_init(&bd_sizes[k].free);
-    sz = sizeof(char)* ROUNDUP(NBLK(k), 8)/8;
+    // 确定大小为2^k的块需要用多少个标志位来记录
+    // 由于一个char可以存储8个位，因此需要再除以8求出需要多少个字节
+    // 如果采用1位表示2个块的状态，存储空间减少一半，即除以16
+    // 注意此时还需要修改底数8为16，为了除以16时向上取整
+    // sz = sizeof(char)* ROUNDUP(NBLK(k), 8)/8;
+    sz = sizeof(char)* ROUNDUP(NBLK(k), 16)/16;
     bd_sizes[k].alloc = p;
     memset(bd_sizes[k].alloc, 0, sz);
     p += sz;
@@ -341,7 +387,13 @@ bd_init(void *base, void *end) {
   // so that buddy will not hand out that memory.
   int unavailable = bd_mark_unavailable(end, p);
   void *bd_end = bd_base+BLK_SIZE(MAXSIZE)-unavailable;
-  
+
+  // 标记空闲区间
+  // p表示空闲分区的起点
+  // end表示空闲分区的终点
+  freespace_start = p;
+  freespace_end = end;
+
   // initialize free lists for each size k
   int free = bd_initfree(p, bd_end);
 
