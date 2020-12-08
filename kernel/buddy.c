@@ -161,7 +161,6 @@ bd_malloc(uint64 nbytes)
 
   // Found a block; pop it and potentially split it.
   char *p = lst_pop(&bd_sizes[k].free);
-  // bit_set(bd_sizes[k].alloc, blk_index(k, p));
   bit_flip(bd_sizes[k].alloc, blk_index(k, p));
   for(; k > fk; k--) {
     // split a block at size k and mark one half allocated at size k-1
@@ -169,7 +168,6 @@ bd_malloc(uint64 nbytes)
     char *q = p + BLK_SIZE(k-1);   // p's buddy
     // mark spilt
     bit_set(bd_sizes[k].split, blk_index(k, p));
-    // bit_set(bd_sizes[k-1].alloc, blk_index(k-1, p));、
     // mark block allocated 
     bit_flip(bd_sizes[k-1].alloc, blk_index(k-1, p));
     // add free block info
@@ -359,9 +357,7 @@ bd_init(void *base, void *end) {
   for (int k = 0; k < nsizes; k++) {
     lst_init(&bd_sizes[k].free);
     // 确定大小为2^k的块需要用多少个标志位来记录
-    // 由于一个char可以存储8个位，因此需要再除以8求出需要多少个字节
     // 如果采用1位表示2个块的状态，存储空间减少一半，即除以16
-    // 注意此时还需要修改底数8为16，为了除以16时向上取整
     // sz = sizeof(char)* ROUNDUP(NBLK(k), 8)/8;
     sz = sizeof(char)* ROUNDUP(NBLK(k), 16)/16;
     bd_sizes[k].alloc = p;
