@@ -392,7 +392,7 @@ bd_init(void *base, void *end) {
   // p表示空闲分区的起点
   // end表示空闲分区的终点
   freespace_start = p;
-  freespace_end = end;
+  freespace_end = bd_end;
 
   // initialize free lists for each size k
   int free = bd_initfree(p, bd_end);
