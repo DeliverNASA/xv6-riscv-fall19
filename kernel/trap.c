@@ -67,6 +67,30 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 13 || r_scause() == 15){  // 13：页加载错误；15：页写入错误
+    // 进一步判断发生错误的页地址
+    // 第一种情况：超出进程允许的空间
+    if(r_stval() >= p->sz) {
+      p->killed = 1;
+    }
+    // 第二种情况：触碰到用户栈
+    else if(r_stval() <= PGROUNDDOWN(p->tf->sp)) {
+      p->killed = 1;
+    } else {
+        char *mem = kalloc();
+        // 申请不到空间，杀死进程
+        if(mem == 0) {
+          p->killed = 1;
+        } else {
+          // steal code from uvmalloc()
+          memset(mem, 0, PGSIZE);
+          // 如果分配表项失败，那么同样需要杀死进程（注意释放申请的空间）
+          if(mappages(p->pagetable, PGROUNDDOWN(r_stval()), PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0) {
+            kfree(mem);
+            p->killed = 1;
+          }
+        }
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

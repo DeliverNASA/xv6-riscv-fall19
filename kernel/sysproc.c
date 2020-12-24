@@ -43,12 +43,30 @@ sys_sbrk(void)
 {
   int addr;
   int n;
+  int newaddr;
 
   if(argint(0, &n) < 0)
     return -1;
+
+  // 新页面的起始地址，恰好等于old sz
   addr = myproc()->sz;
-  if(growproc(n) < 0)
-    return -1;
+  // if(growproc(n) < 0)
+  //   return -1;
+
+  // 下一个页的地址
+  newaddr = PGROUNDUP(addr + n);
+  // 超出地址空间，无法分配
+  // 第一种情况：小于最低地址
+  // 第二种情况：大于最高地址
+  if(newaddr < PGSIZE || newaddr >= MAXVA) {
+    exit(-1);
+  }
+  // n为负数的情况，看看是否能释放空间
+  if(newaddr < addr) {
+    uvmdealloc(myproc()->pagetable, addr, newaddr);
+  }
+  myproc()->sz = newaddr;
+
   return addr;
 }
 

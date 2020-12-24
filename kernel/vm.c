@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -82,16 +84,22 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
     panic("walk");
 
   for(int level = 2; level > 0; level--) {
+    // 指向对应的表项
+    // 层级：从上到下
     pte_t *pte = &pagetable[PX(level, va)];
+    // 如果当前页表项是有效的，获取物理地址
     if(*pte & PTE_V) {
       pagetable = (pagetable_t)PTE2PA(*pte);
-    } else {
+    } 
+    // 如果页表项是无效的，看看是否需要将其分配
+    else {
       if(!alloc || (pagetable = (pde_t*)kalloc()) == 0)
         return 0;
       memset(pagetable, 0, PGSIZE);
       *pte = PA2PTE(pagetable) | PTE_V;
     }
   }
+  // 返回最后的物理地址指针
   return &pagetable[PX(0, va)];
 }
 
@@ -187,19 +195,24 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 size, int do_free)
   a = PGROUNDDOWN(va);
   last = PGROUNDDOWN(va + size - 1);
   for(;;){
+    // 找不到表项，因为可能就没有分配
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
-    if((*pte & PTE_V) == 0){
-      printf("va=%p pte=%p\n", a, *pte);
-      panic("uvmunmap: not mapped");
-    }
+      // panic("uvmunmap: walk");
+      goto end;
+    // if((*pte & PTE_V) == 0){
+      // printf("va=%p pte=%p\n", a, *pte);
+      // panic("uvmunmap: not mapped");
+    // }
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
-    if(do_free){
+    // 释放物理空间
+    if(do_free && ((*pte & PTE_V) != 0)){
       pa = PTE2PA(*pte);
       kfree((void*)pa);
     }
     *pte = 0;
+    
+    end:
     if(a == last)
       break;
     a += PGSIZE;
@@ -275,6 +288,7 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
     return oldsz;
 
   uint64 newup = PGROUNDUP(newsz);
+  // 释放空间
   if(newup < PGROUNDUP(oldsz))
     uvmunmap(pagetable, newup, oldsz - newup, 1);
 
@@ -326,9 +340,11 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      // panic("uvmcopy: pte should exist");
+      continue;
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      // panic("uvmcopy: page not present");
+      continue;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -359,6 +375,7 @@ uvmclear(pagetable_t pagetable, uint64 va)
   *pte &= ~PTE_U;
 }
 
+
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
@@ -370,8 +387,21 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+    if(pa0 == 0) {
+      if(dstva >= myproc()->sz) {
+        return -1;
+      }
+      char *mem = kalloc();
+      if(mem == 0) {
+        return -1;
+      }
+      pa0 = (uint64) mem;
+      memset(mem, 0, PGSIZE);
+      if(mappages(pagetable, va0, PGSIZE, pa0, PTE_W|PTE_X|PTE_R|PTE_U) != 0) {
+        kfree(mem);
+        return -1;
+      }
+    }
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -395,8 +425,21 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+    if(pa0 == 0) {
+      if(srcva >= myproc()->sz) {
+        return -1;
+      }
+      char *mem = kalloc();
+      if(mem == 0) {
+        return -1;
+      }
+      pa0 = (uint64) mem;
+      memset(mem, 0, PGSIZE);
+      if(mappages(pagetable, va0, PGSIZE, pa0, PTE_W|PTE_X|PTE_R|PTE_U) != 0) {
+        kfree(mem);
+        return -1;
+      }
+    }
     n = PGSIZE - (srcva - va0);
     if(n > len)
       n = len;
@@ -408,6 +451,7 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
   }
   return 0;
 }
+
 
 // Copy a null-terminated string from user to kernel.
 // Copy bytes to dst from virtual address srcva in a given page table,
@@ -449,5 +493,39 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return 0;
   } else {
     return -1;
+  }
+}
+
+// vmprint
+void vmprint(pagetable_t pagetable) {
+  printf("page table %p\n", pagetable);
+  vmprint_tool(pagetable, 1);
+}
+
+// tools for vmprint
+void vmprint_tool(pagetable_t pagetable, int depth) {
+  char *format;
+
+  // 规定输出格式
+  if(depth == 1) {
+    format = " ..%d: pte %p pa %p\n";
+  } else if(depth == 2) {
+    format = " .. ..%d: pte %p pa %p\n";
+  } else if(depth == 3) {
+    format = " .. .. ..%d: pte %p pa %p\n";
+  } else {
+    return;
+  }
+
+  // 在该页表中遍历有效的表项
+  for(int i = 0; i < 512; i++) {
+    pte_t pte = pagetable[i];
+    if(pte & PTE_V) {
+      // 获取子目录对应的物理页号
+      uint64 child = PTE2PA(pte);
+      printf(format, i, pte, child);
+      // 递归搜索子目录
+      vmprint_tool((pagetable_t)child, depth+1);
+    }
   }
 }
