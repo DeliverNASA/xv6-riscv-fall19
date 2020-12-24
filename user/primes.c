@@ -25,6 +25,7 @@ void Prime(int fd_in) {
 
     if(fork() == 0) {
         // child
+        // 从输入管道中选择数据到新管道的输入
         SelectData(divide, fd_in, cur_fd[1]);
         exit();
     }else {

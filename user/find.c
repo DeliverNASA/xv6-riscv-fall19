@@ -74,6 +74,7 @@ find(char* path, char* name){
                 p[DIRSIZ] = 0;
 
                 // avoid . and ..
+                // 避免目录项为"."和".."，因为其会造成递归的查找，陷入死循环
                 if(!strcmp(de.name, ".") || !strcmp(de.name, "..")) continue;
                 find(buf, name);
             }
