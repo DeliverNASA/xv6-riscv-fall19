@@ -38,6 +38,7 @@ void
 binit(void)
 {
   struct buf *b;
+  // 初始化哈希
   for(int i = 0; i < NBUCKETS; i++) {
     bcache.hashbucket[i].prev = &bcache.hashbucket[i];
     bcache.hashbucket[i].next = &bcache.hashbucket[i];
@@ -45,6 +46,7 @@ binit(void)
   }
 
   // Create linked list of buffers
+  // 头插法创建链表
   for(b = bcache.buf; b < bcache.buf + NBUF; b++) {
     b->next = bcache.hashbucket[0].next;
     b->prev = &bcache.hashbucket[0];
@@ -66,6 +68,7 @@ bget(uint dev, uint blockno)
   acquire(&bcache.lock[id]);
 
   // Is the block already cached?
+  // 如果已经存在，添加引用
   for(b = bcache.hashbucket[id].next; b != &bcache.hashbucket[id]; b = b->next){
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
@@ -76,6 +79,7 @@ bget(uint dev, uint blockno)
   }
 
   // Not cached; recycle an unused buffer.
+  // 如果不存在，选择合适的buffer分配
   for(b = bcache.hashbucket[id].prev; b != &bcache.hashbucket[id]; b = b->prev){
     if(b->refcnt == 0) {
       b->dev = dev;
@@ -89,6 +93,7 @@ bget(uint dev, uint blockno)
   }
 
   // while lacking of unused buffer, steal buffer from other hashbuckets 
+  // 偷取其他的buffer
   for(int i = 0; i < NBUCKETS; i++) {
     if(i == id) continue;
     acquire(&bcache.lock[i]);
@@ -100,10 +105,12 @@ bget(uint dev, uint blockno)
         b->refcnt = 1;
 
         // change original list
+        // 修改自身的buffer表
         b->next->prev = b->prev;
         b->prev->next = b->next;
 
         // change current list
+        // 修改偷取对象的buffer表
         b->next = bcache.hashbucket[id].next;
         b->prev = &bcache.hashbucket[id];
         bcache.hashbucket[id].next->prev = b;
@@ -158,6 +165,7 @@ brelse(struct buf *b)
   uint id = (*b).blockno % NBUCKETS;
   acquire(&bcache.lock[id]);
   b->refcnt--;
+  // 如果引用数为0，释放buffer，添加到头部后面
   if (b->refcnt == 0) {
     // no one is waiting for it.
     b->next->prev = b->prev;

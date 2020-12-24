@@ -64,6 +64,7 @@ kfree(void *pa)
   int id = cpuid();
   pop_off();
   acquire(&kmems[id].lock);
+  // 释放当前cpu编号的空间
   r->next = kmems[id].freelist;
   kmems[id].freelist = r;
   release(&kmems[id].lock);
@@ -82,6 +83,7 @@ kalloc(void)
   pop_off();
   
   for(int i = 0; i < NCPU; i++) {
+    // 哈希映射到要使用的freelist
     id = (base + i) % NCPU;
     acquire(&kmems[id].lock);
     r = kmems[id].freelist;
