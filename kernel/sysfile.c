@@ -244,30 +244,38 @@ create(char *path, short type, short major, short minor)
   struct inode *ip, *dp;
   char name[DIRSIZ];
 
+  // 如果找不到目录inode，返回
   if((dp = nameiparent(path, name)) == 0)
     return 0;
 
   ilock(dp);
 
+  // 在目录中找到所要的文件名name
   if((ip = dirlookup(dp, name, 0)) != 0){
     iunlockput(dp);
     ilock(ip);
+    // 是文件类型，返回inode指针
     if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
       return ip;
+    // 不是的话，返回0
     iunlockput(ip);
     return 0;
   }
 
+  // 申请一个inode指针
   if((ip = ialloc(dp->dev, type)) == 0)
     panic("create: ialloc");
 
+  // 初始化
   ilock(ip);
   ip->major = major;
   ip->minor = minor;
   ip->nlink = 1;
   iupdate(ip);
 
+  // 如果创建的类型是目录
   if(type == T_DIR){  // Create . and .. entries.
+    // 添加上级目录的引用
     dp->nlink++;  // for ".."
     iupdate(dp);
     // No ip->nlink++ for ".": avoid cyclic ref count.
@@ -275,6 +283,7 @@ create(char *path, short type, short major, short minor)
       panic("create dots");
   }
 
+  // 添加到所在目录中
   if(dirlink(dp, name, ip->inum) < 0)
     panic("create: dirlink");
 
@@ -314,6 +323,26 @@ sys_open(void)
       end_op(ROOTDEV);
       return -1;
     }
+    // 计数器
+    int count = 0;
+    // 递归的获取inode
+    while (ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+      readi(ip, 0, (uint64)path, 0, MAXPATH);
+      iunlockput(ip);
+      count++;
+      if(count > 10) {
+        // panic("too many times");
+        end_op(ROOTDEV);
+        return -1;
+      }
+      // 利用当前文件内容作为路径匹配，如果获取失败，退出
+      if((ip = namei(path)) == 0) {
+        end_op(ROOTDEV);
+        return -1;
+      }
+      // 为inode指针上锁
+      ilock(ip);
+    }    
   }
 
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
@@ -483,3 +512,32 @@ sys_pipe(void)
   return 0;
 }
 
+uint64
+sys_symlink(void)
+{
+  // 建立软链接文件
+  char path[MAXPATH], target[MAXPATH];
+  struct inode *ip;
+
+  // 获取参数，第0个是源路径，第1个是新路径
+  if((argstr(0, path, MAXPATH)) < 0 || argstr(1, target, MAXPATH) < 0)
+    return -1;
+
+  begin_op(ROOTDEV);
+
+  // 创建一个inode指针
+  ip = create(target, T_SYMLINK, 0, 0);    
+  // 创建失败
+  if(ip == 0){
+    end_op(ROOTDEV);
+    return -1;
+  }
+  // 写入inode
+  // ip->type = T_SYMLINK;
+  // 将路径写入文件
+  writei(ip, 0, (uint64)path, 0, MAXPATH);
+  iunlockput(ip);
+  end_op(ROOTDEV);
+
+  return 0;
+}
