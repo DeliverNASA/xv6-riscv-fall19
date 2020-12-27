@@ -41,6 +41,7 @@ cleanup(void)
 }
 
 // stat a symbolic link using O_NOFOLLOW
+// 获取文件信息，存在st中
 static int
 stat_slink(char *pn, struct stat *st)
 {

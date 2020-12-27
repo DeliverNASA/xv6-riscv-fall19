@@ -313,11 +313,13 @@ sys_open(void)
       return -1;
     }
   } else {
+    // 获取inode失败
     if((ip = namei(path)) == 0){
       end_op(ROOTDEV);
       return -1;
     }
     ilock(ip);
+    // 类型是目录且模式不是只读
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op(ROOTDEV);
@@ -326,6 +328,7 @@ sys_open(void)
     // 计数器
     int count = 0;
     // 递归的获取inode
+    // O_NOFFLOW的意义在于是否要获取符号链接文件本身
     while (ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
       readi(ip, 0, (uint64)path, 0, MAXPATH);
       iunlockput(ip);
@@ -532,8 +535,6 @@ sys_symlink(void)
     end_op(ROOTDEV);
     return -1;
   }
-  // 写入inode
-  // ip->type = T_SYMLINK;
   // 将路径写入文件
   writei(ip, 0, (uint64)path, 0, MAXPATH);
   iunlockput(ip);
