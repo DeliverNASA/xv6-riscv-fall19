@@ -75,7 +75,9 @@ kvminithart()
 //   21..39 -- 9 bits of level-1 index.
 //   12..20 -- 9 bits of level-0 index.
 //    0..12 -- 12 bits of byte offset within the page.
-static pte_t *
+// static pte_t *
+// 修改的地方：取消static限制
+pte_t*
 walk(pagetable_t pagetable, uint64 va, int alloc)
 {
   if(va >= MAXVA)
@@ -163,7 +165,8 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   for(;;){
     if((pte = walk(pagetable, a, 1)) == 0)
       return -1;
-    if(*pte & PTE_V)
+    // 如果当前的pte不是cow且可用
+    if(*pte & PTE_V && (*pte & PTE_COW) == 0)
       panic("remap");
     *pte = PA2PTE(pa) | perm | PTE_V;
     if(a == last)
@@ -322,22 +325,40 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
+  // Map parent physical pages into the child 
+  // instead of allocating new pages
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
+    // 将Parent和Child的pte权限设置为不可写，且均为COW
+    *pte = (*pte & ~PTE_W) | PTE_COW;
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+
+    // 不需要重新分配物理内存
+    // if((mem = kalloc()) == 0)
+    //   goto err;
+    // memmove(mem, (char*)pa, PGSIZE);
+    // if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+    //   kfree(mem);
+    //   goto err;
+    // }
+
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
+      // kfree(mem);
+      printf("uvmcopy: map fail");
       goto err;
     }
+    // add reference
+    addRef((void*)pa);
+    // kRefInc((uint64)pa);
+    // printf("origin perm: %x, new perm %x \n", PTE_FLAGS(*walk(old,i,0)), PTE_FLAGS(*walk(new,i,0)));
+    // printf("origin perm & PTE_COW: %d, new perm & PTE_COW %d \n", PTE_FLAGS(*walk(old,i,0)) & PTE_COW, PTE_FLAGS(*walk(new,i,0)) & PTE_COW);
+
+
   }
   return 0;
 
@@ -366,9 +387,43 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+    if(va0 > MAXVA){
+      printf("va is larger than MAXVA!\n");
+      return -1;
+    }
+
+
+    // 处理COW导致的页中断
+    pte = walk(pagetable, va0, 0);
+    if(*pte & PTE_COW){
+      char *mem;
+      // 申请新的物理内存
+      if((mem = kalloc()) == 0) {
+        printf("usertrap(): memery alloc fault\n");
+        return -1;
+      }
+      memset(mem, 0, PGSIZE);
+      uint64 pa = walkaddr(pagetable, va0);
+
+      // 判别物理地址是否存在
+      if(pa) {
+        memmove(mem, (char*)pa, PGSIZE);
+        int perm = PTE_FLAGS(*pte);
+        perm |= PTE_W;
+        perm &= ~PTE_COW;
+        // 判断印射是否成功
+        if(mappages(pagetable, va0, PGSIZE, (uint64)mem, perm) != 0) {
+          printf("usertrap: can not map page\n");
+          kfree(mem);
+          return -1;
+        }
+        kfree((void*) pa);
+      }
+    }
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;

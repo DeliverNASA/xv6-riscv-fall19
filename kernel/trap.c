@@ -67,12 +67,79 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } 
+  // 修改部分：判别页分配错误
+  else if(r_scause() == 15){
+    pte_t* pte;
+    uint64 va = PGROUNDDOWN(r_stval());
+
+    if(va >= MAXVA){
+      printf("va is larger than MAXVA!\n");
+      p->killed = 1;
+      goto end;
+    }
+
+    if(va > p->sz){
+      printf("va is larger than sz!\n");
+      p->killed = 1;
+      goto end;
+    }
+
+    pte = walk(p->pagetable, va, 0);
+
+    // 当前页表是空的或者不是COW类型，都不能继续执行
+    // 默认只有为child分配内存的时候才会陷入该中断
+    if(pte == 0 || ((*pte) & PTE_COW) == 0 || ((*pte) & PTE_V) == 0 || ((*pte) & PTE_U) == 0) {
+      printf("usertrap: pte not exist or it's not cow page\n");
+      p->killed = 1;
+      goto end;
+    }
+
+    // 处理COW导致的页中断
+    if(*pte & PTE_COW){
+      char *mem;
+      // 申请新的物理内存
+      if((mem = kalloc()) == 0) {
+        printf("usertrap(): memery alloc fault\n");
+        p->killed = 1;
+        goto end;
+      }
+      memset(mem, 0, PGSIZE);
+      uint64 pa = walkaddr(p->pagetable, va);
+
+      // 判别物理地址是否存在
+      if(pa) {
+        memmove(mem, (char*)pa, PGSIZE);
+        int perm = PTE_FLAGS(*pte);
+        perm |= PTE_W;
+        perm &= ~PTE_COW;
+        // 判断印射是否成功
+        if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, perm) != 0) {
+          printf("usertrap: can not map page\n");
+          kfree(mem);
+          p->killed = 1;
+          goto end;
+        }
+        kfree((void*) pa);
+      }
+    }
+    else
+    {
+      printf("usertrap: not cause by cow.\n");
+      p->killed = 1;
+      goto end;
+    }
+
+
+
+  }
+  
+  else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
   }
-
+end:
   if(p->killed)
     exit(-1);
 
