@@ -69,18 +69,19 @@ usertrap(void)
     // ok
   } 
   // 修改部分：判别页分配错误
+  // 15是缺页中断的编号
   else if(r_scause() == 15){
     pte_t* pte;
     uint64 va = PGROUNDDOWN(r_stval());
 
     if(va >= MAXVA){
-      printf("va is larger than MAXVA!\n");
+      printf("usertrap: va is larger than MAXVA!\n");
       p->killed = 1;
       goto end;
     }
 
     if(va > p->sz){
-      printf("va is larger than sz!\n");
+      printf("usertrap: va is larger than sz!\n");
       p->killed = 1;
       goto end;
     }
@@ -89,33 +90,60 @@ usertrap(void)
 
     // 当前页表是空的或者不是COW类型，都不能继续执行
     // 默认只有为child分配内存的时候才会陷入该中断
+    // 因此要求指针存在，但是标志位PTE_COW有效，PTE_W无效
     if(pte == 0 || ((*pte) & PTE_COW) == 0 || ((*pte) & PTE_V) == 0 || ((*pte) & PTE_U) == 0) {
       printf("usertrap: pte not exist or it's not cow page\n");
       p->killed = 1;
       goto end;
     }
 
-    // 处理COW导致的页中断
-    if(*pte & PTE_COW){
+    // // 处理COW导致的页中断
+    // if(*pte & PTE_COW){
+    //   char *mem;
+    //   // 申请新的物理内存
+    //   if((mem = kalloc()) == 0) {
+    //     printf("usertrap(): memery alloc fault\n");
+    //     p->killed = 1;
+    //     goto end;
+    //   }
+    //   memset(mem, 0, PGSIZE);
+    //   uint64 pa = walkaddr(p->pagetable, va);
+
+    //   // 判别物理地址是否存在
+    //   if(pa) {
+    //     memmove(mem, (char*)pa, PGSIZE);
+    //     int perm = PTE_FLAGS(*pte);
+    //     perm |= PTE_W;
+    //     perm &= ~PTE_COW;
+    //     // 判断印射是否成功
+    //     if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, perm) != 0) {
+    //       printf("usertrap: can not map page\n");
+    //       kfree(mem);
+    //       p->killed = 1;
+    //       goto end;
+    //     }
+    //     kfree((void*) pa);
+    //   }
+    // }
+    if(*pte & PTE_COW) {
+      // 一下部分代码来自原来vm中的uvmcopy
       char *mem;
-      // 申请新的物理内存
       if((mem = kalloc()) == 0) {
-        printf("usertrap(): memery alloc fault\n");
+        printf("usertrap: allocate memory failed.\n");
         p->killed = 1;
         goto end;
       }
-      memset(mem, 0, PGSIZE);
+      // 找到当前物理地址，然后复制过来
       uint64 pa = walkaddr(p->pagetable, va);
-
-      // 判别物理地址是否存在
       if(pa) {
         memmove(mem, (char*)pa, PGSIZE);
-        int perm = PTE_FLAGS(*pte);
-        perm |= PTE_W;
-        perm &= ~PTE_COW;
-        // 判断印射是否成功
-        if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, perm) != 0) {
-          printf("usertrap: can not map page\n");
+        // 然后修改标志位
+        int flags = PTE_FLAGS(*pte);
+        flags &= ~PTE_COW;
+        flags |= PTE_W;
+        // 将当前进程的页面和物理空间进行映射
+        if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, flags) != 0){
+          printf("usertrap: map new address failed.\n");
           kfree(mem);
           p->killed = 1;
           goto end;
@@ -123,17 +151,12 @@ usertrap(void)
         kfree((void*) pa);
       }
     }
-    else
-    {
+    else {
       printf("usertrap: not cause by cow.\n");
       p->killed = 1;
       goto end;
     }
-
-
-
   }
-  
   else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

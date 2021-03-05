@@ -352,9 +352,9 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       printf("uvmcopy: map fail");
       goto err;
     }
-    // add reference
+    // 添加对当前物理地址的引用
+    // 只有当全部引用都消除之后才能释放该内存
     addRef((void*)pa);
-    // kRefInc((uint64)pa);
     // printf("origin perm: %x, new perm %x \n", PTE_FLAGS(*walk(old,i,0)), PTE_FLAGS(*walk(new,i,0)));
     // printf("origin perm & PTE_COW: %d, new perm & PTE_COW %d \n", PTE_FLAGS(*walk(old,i,0)) & PTE_COW, PTE_FLAGS(*walk(new,i,0)) & PTE_COW);
 
@@ -383,6 +383,7 @@ uvmclear(pagetable_t pagetable, uint64 va)
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
+// copyout相当于写入页，所以需要处理COW
 int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
@@ -390,26 +391,24 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   pte_t *pte;
 
   while(len > 0){
+    // 目标虚拟地址
     va0 = PGROUNDDOWN(dstva);
     if(va0 > MAXVA){
       printf("va is larger than MAXVA!\n");
       return -1;
     }
 
-
-    // 处理COW导致的页中断
     pte = walk(pagetable, va0, 0);
     if(*pte & PTE_COW){
       char *mem;
       // 申请新的物理内存
       if((mem = kalloc()) == 0) {
-        printf("usertrap(): memery alloc fault\n");
+        printf("copyout: memery alloc fault\n");
         return -1;
       }
       memset(mem, 0, PGSIZE);
       uint64 pa = walkaddr(pagetable, va0);
 
-      // 判别物理地址是否存在
       if(pa) {
         memmove(mem, (char*)pa, PGSIZE);
         int perm = PTE_FLAGS(*pte);
@@ -417,13 +416,18 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
         perm &= ~PTE_COW;
         // 判断印射是否成功
         if(mappages(pagetable, va0, PGSIZE, (uint64)mem, perm) != 0) {
-          printf("usertrap: can not map page\n");
+          printf("copyout: can not map page\n");
           kfree(mem);
           return -1;
         }
+        // 然后减少引用并判断是否能够释放
+        // 仔细思考是肯定不能释放的
+        // 如果有cow的话说明引用数至少为2
         kfree((void*) pa);
       }
     }
+
+
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
