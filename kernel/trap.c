@@ -77,8 +77,18 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  // 如果陷入了时钟导致的中断，调用函数处理
+  if(which_dev == 2) {
+    p->tickpassed++;
+    if(p->ticks != 0) {
+      if(p->tickpassed == p->ticks) {
+        // 保存寄存器的值
+        memmove(&p->temp_tf, p->tf, sizeof(struct trapframe));
+        p->tf->epc = (uint64)p->handler;
+      }
+    }
     yield();
+  }
 
   usertrapret();
 }
